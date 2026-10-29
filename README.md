@@ -54,6 +54,8 @@ Magisk 模块: ~~[Riru - Location Report Enabler](https://github.com/RikkaApps/R
 
 本模块的代码与文档在 AI 辅助下完成，并在真机上完成验证。
 
+发布包（Release 中的 zip）只包含刷入所需的 `META-INF/`、`customize.sh` 与 `module.prop`；README 仅随仓库提供，不放进压缩包，避免刷入时带入无关文件。
+
 ## 致谢
 
 感谢以下上游项目：

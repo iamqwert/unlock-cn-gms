@@ -33,10 +33,17 @@ jobs:
 
       - name: Pack module
         run: |
-          # 模块 zip 必须让 META-INF/customize.sh/module.prop 位于根目录，
-          # 同时排除隐藏文件、已有的 zip 以及 CI 自身
+          # 模块 zip 只放刷入所需文件，META-INF/customize.sh/module.prop 位于根目录；
+          # README 仅随仓库提供，不随包分发
           zip -r "${{ steps.prop.outputs.zip_name }}" . \
-            -x ".*" -x "*.zip" -x "*/.git/*" -x "*/.github/*"
+            -x ".*" -x "*.zip" -x "README.md" -x "*/.git/*" -x "*/.github/*"
+
+          # 兜底校验：README 一旦混入就让构建失败，避免发出带说明文档的刷机包
+          if unzip -l "${{ steps.prop.outputs.zip_name }}" | grep -qiE '(^|/)README\.md$'; then
+            echo "::error::模块 zip 中不应包含 README.md"
+            exit 1
+          fi
+          unzip -l "${{ steps.prop.outputs.zip_name }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
