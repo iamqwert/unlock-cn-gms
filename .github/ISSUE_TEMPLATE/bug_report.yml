@@ -1,0 +1,84 @@
+name: Bug 报告
+description: 模块未生效、Play 商店仍提示“已是最新版本”、位置记录/时间轴不可用等问题
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先确认：已刷入本模块并**重启**，且没有同时开启其它会改动同一批权限文件的模块。
+        纯功能建议请使用 Feature request 模板。
+
+  - type: input
+    id: device
+    attributes:
+      label: 机型
+      placeholder: 例如 Redmi K90 Pro Max (25102RKBEC)
+    validations:
+      required: true
+
+  - type: input
+    id: rom
+    attributes:
+      label: ROM / 系统版本
+      placeholder: 例如 HyperOS 3 / ColorOS 16.0.1 / Android 17
+    validations:
+      required: true
+
+  - type: dropdown
+    id: root
+    attributes:
+      label: Root 方案
+      options:
+        - Magisk
+        - KernelSU
+        - APatch
+        - 其他（请在下方补充）
+    validations:
+      required: true
+
+  - type: input
+    id: root_info
+    attributes:
+      label: Root 版本 / 元模块
+      placeholder: 例如 KernelSU 1.0.2 + meta-overlayfs；Magisk 29.0
+    validations:
+      required: true
+
+  - type: input
+    id: module_version
+    attributes:
+      label: 模块版本
+      description: module.prop 中的 version，例如 v3.9
+    validations:
+      required: true
+
+  - type: textarea
+    id: features
+    attributes:
+      label: 系统特征检查结果
+      description: 重启后执行 `adb shell pm list features | grep -E 'cn\.google|services_updater'` 并粘贴输出（无输出请写“无输出”）
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: other_modules
+    attributes:
+      label: 同时启用的相关模块
+      description: 例如 LSPosed 版 UnlockCNGMS、其它 GMS/Play 商店相关模块（请注明作用域）
+      render: text
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述与复现步骤
+      description: 期望行为、实际行为、从哪一步开始不符合预期
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / 截图
+      description: 模块安装日志、`logcat`、Play 商店界面截图等
+      render: shell

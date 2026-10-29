@@ -1,0 +1,25 @@
+name: Feature request
+description: 新增机型/分区支持、新的国行限制解除等建议
+title: "[Feature] "
+body:
+  - type: textarea
+    id: request
+    attributes:
+      label: 需求描述
+      description: 希望模块做什么，解决什么问题
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 相关设备 / 系统信息
+      description: 涉及机型、ROM 版本、Android 版本、Root 方案，以及相关文件路径（如 `etc/permissions` 下的文件名）
+      render: text
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 参考资料
+      description: 相关 issue、日志、配置文件片段等
+      render: text
