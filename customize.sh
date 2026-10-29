@@ -42,9 +42,61 @@ for dir in /my_*/etc; do
     [ -d "$dir" ] && FALLBACK_DIRS="$FALLBACK_DIRS $dir"
 done
 
+# MODPATH 由管理器注入，正常情况下指向 /data/adb/modules(_update)/<id>。
+# 万一为空或是根目录，下面的 cp / sed -i 会直接改到系统分区上的真实文件，必须先拦住。
+case "$MODPATH" in
+    /data/*) ;;
+    *) abort "MODPATH 异常（$MODPATH），已中止" ;;
+esac
+
 found=false
-need_bind_mount=false
 seen=
+pfsd_ready=false
+
+# post-fs-data.sh 的头部：定义 inject()，把「要不要自己挂载」推迟到运行时判断。
+# 这样在 KernelSU magic mount / NoMount / meta-overlayfs 这些后端已经把文件注入好的机器上，
+# 不会再额外产生一条指向模块目录的 bind mount —— 那种挂载项会被检测工具判定为异常。
+pfsd_write_header() {
+    if $pfsd_ready; then
+        return 0
+    fi
+    pfsd_ready=true
+    {
+        printf '%s\n' '#!/system/bin/sh'
+        cat <<'EOS'
+# 由 customize.sh 生成，请勿手改。
+#
+# 注入策略：后端（KernelSU magic mount、NoMount、meta-overlayfs 等）已经把模块内的文件
+# 映射到目标路径时，这里读到的就是清理后的副本，于是不再自己挂载；只有后端没有覆盖
+# （/my_* 这类私有分区、或没装元模块的 root 方案）才回退成只读 bind mount。
+# 不做这一步的话，每台机器都会多出几条指向模块目录的 bind mount，
+# 会被检测工具当成“系统挂载项异常”，也会绕过 NoMount 这类元模块的 UID 隔离。
+
+# 模块目录从 $0 推出来（可能是绝对路径，也可能被先 cd 进模块目录后用相对路径调用）
+MODDIR=${0%/*}
+if [ ! -d "$MODDIR/system" ] && [ ! -d "$MODDIR/bind" ]; then
+    MODDIR=/data/adb/modules/com.fei_ke.unlockcngms
+fi
+
+inject() {
+    src=$1
+    dst=$2
+    [ -f "$src" ] || return 0
+    [ -e "$dst" ] || return 0
+    if command -v cmp >/dev/null 2>&1 && cmp -s "$src" "$dst" 2>/dev/null; then
+        return 0
+    fi
+    mount -o ro,bind "$src" "$dst" 2>/dev/null
+}
+EOS
+    } > "$MODPATH/post-fs-data.sh"
+}
+
+# 把一条注入关系写进 post-fs-data.sh
+pfsd_add() {
+    pfsd_write_header
+    echo "inject \$MODDIR/$1 $2" >> "$MODPATH/post-fs-data.sh"
+}
 
 # 只认领“可读、体积小、确实是 XML 且真的含标记”的文件，
 # 避免把二进制或无关配置误当作声明文件复制进模块。
@@ -76,7 +128,21 @@ clean_file() {
     fi
 }
 
-# 处理一个命中文件：按所在分区决定模块内路径，再挂一次只读 bind mount。
+# 扫描结果会被原样写进 post-fs-data.sh，而那个脚本以 root 在每次开机时执行。
+# 所以只接受「落在已知分区下、且不含空白与 shell 元字符」的路径：
+# 名称里带 $ ; ` 空格 的文件一律跳过，避免被当成代码拼进去（也避免路径拆分）。
+is_safe_path() {
+    case "$1" in
+        /system/*|/system_ext/*|/product/*|/vendor/*|/odm/*|/my_*/*) ;;
+        *) return 1 ;;
+    esac
+    case "$1" in
+        *[!A-Za-z0-9._/+@-]*) return 1 ;;
+    esac
+    return 0
+}
+
+# 处理一个命中文件：按所在分区决定模块内路径，再登记一条注入关系。
 handle_file() {
     origin=$1
 
@@ -86,30 +152,30 @@ handle_file() {
     [ -n "$real" ] || real=$origin
     case "$seen" in *"|$real|"*) return ;; esac
     seen="$seen|$real|"
-    found=true
+
+    if ! is_safe_path "$real"; then
+        ui_print "! 跳过路径不符预期的文件: $real"
+        return
+    fi
 
     # 能被模块 overlay 直接覆盖的分区，按 $MODPATH/system/<分区>/... 存放；
-    # 厂商私有分区（/my_* 等）无法放进 system 树，只做 bind mount。
+    # 厂商私有分区（/my_* 等）无法放进 system 树，单独放 bind/ 下只做 bind mount。
     case "$real" in
         /system/*) rel=${real#/} ;;
         /system_ext/*|/product/*|/vendor/*|/odm/*) rel=system${real} ;;
-        *) rel= ;;
+        *) rel=bind${real} ;;
     esac
-
-    if [ -z "$rel" ]; then
-        rel=bind/$(echo "$real" | sed 's#^/##; s#/#_#g')
-    fi
 
     target=$MODPATH/$rel
     mkdir -p "$(dirname "$target")"
+    # 复制失败就不算这一步成功：没有副本，注入也无从谈起
     cp -f "$real" "$target" || return
     clean_file "$target"
+    found=true
 
-    # 无论 root 方案是 Magisk、KernelSU 还是 APatch，都额外做一次只读 bind mount。
-    # KernelSU/APatch 在没有 meta-overlayfs 之类元模块时不会挂载 $MODPATH/system，
-    # 只靠文件覆盖会静默失效（Play 商店因此保持国行标签）。
-    echo "mount -o ro,bind \${0%/*}/$rel $real" >> "$MODPATH/post-fs-data.sh"
-    need_bind_mount=true
+    # 只登记注入关系，是否真的挂载交给 post-fs-data.sh 运行时判断：
+    # 后端已经注入（内容一致）就不挂，避免在 /proc/mounts 留下多余的挂载项。
+    pfsd_add "$rel" "$real"
     ui_print "modify $real"
 }
 
@@ -145,20 +211,31 @@ if ! $found && [ -f "$PREV_MODULE/post-fs-data.sh" ] && [ "$PREV_MODULE" != "$MO
     ui_print "- 检测到模块已生效，原文件被本模块的挂载遮挡"
     ui_print "- 沿用上次的处理结果，不重新扫描"
 
-    for f in "$PREV_MODULE"/*; do
-        [ -e "$f" ] || continue
-        case "${f##*/}" in
-            # 这几个是 root 方案的控制文件，跟着复制过去会把新装的模块禁用/删除
-            module.prop|post-fs-data.sh|disable|remove|skip_mount|update) continue ;;
-        esac
-        cp -a "$f" "$MODPATH/" 2>/dev/null
+    # 只沿用模块自己产出的两个数据目录，不整目录复制：
+    # 旧模块目录里若多出 service.sh / uninstall.sh 之类的脚本，会被带过来以 root 执行。
+    for d in system bind; do
+        [ -d "$PREV_MODULE/$d" ] || continue
+        mkdir -p "$MODPATH/$d"
+        cp -a "$PREV_MODULE/$d/." "$MODPATH/$d/" 2>/dev/null
     done
-    cp -f "$PREV_MODULE/post-fs-data.sh" "$MODPATH/post-fs-data.sh"
+    # 旧版的 post-fs-data.sh 是无条件 mount 的写法，升级时改写成 inject 形式后重新生成，
+    # 让升级上来的机器同样不再产生多余的挂载项。
+    pfsd_write_header
+    # 旧写法 mount -o ro,bind ${0%/*}/<rel> <real> → 新写法 inject $MODDIR/<rel> <real>；
+    # 已经是新写法的原样保留，最后去重（两遍输出可能撞同一条）
+    {
+        sed -n 's|^mount -o ro,bind \${0%/\*}/|inject $MODDIR/|p' \
+            "$PREV_MODULE/post-fs-data.sh" 2>/dev/null
+        grep '^inject $MODDIR/' "$PREV_MODULE/post-fs-data.sh" 2>/dev/null
+    } | awk '!seen[$0]++' > "$MODPATH/.pfsd.new"
+    if [ -s "$MODPATH/.pfsd.new" ]; then
+        cat "$MODPATH/.pfsd.new" >> "$MODPATH/post-fs-data.sh"
+    else
+        # 解析不出注入关系时保持旧文件原样：宁可留着挂载项，也不能让模块静默失效
+        cp -f "$PREV_MODULE/post-fs-data.sh" "$MODPATH/post-fs-data.sh"
+    fi
+    rm -f "$MODPATH/.pfsd.new"
     found=true
-fi
-
-if $need_bind_mount; then
-    sed -i '1i#!/system/bin/sh' "$MODPATH/post-fs-data.sh"
 fi
 
 # 没找到就不要装作装好了：装上也不会生效，反而让人以为模块坏了。
