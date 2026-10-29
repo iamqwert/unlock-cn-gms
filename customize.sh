@@ -26,8 +26,10 @@ for dir in /my_*/etc/permissions /my_*/etc/sysconfig; do
     [ -d "$dir" ] && DIRS="$DIRS $dir"
 done
 
-# 兜底扫描范围：整个 etc 树。部分 ROM 会把声明文件放进自定义子目录，
-# 或者干脆换个文件名，首轮 *.xml 扫不到时再递归找一遍。
+# 兜底扫描范围：各分区的 etc 根目录。部分 ROM 会把声明文件放进自定义子目录，
+# 首轮 *.xml 扫不到时，再往下沉两层找一遍。
+# 注意：这里只能用 find（默认不跟随符号链接），绝不能用 grep -r ——
+# busybox 的 -r 等同 -R，会跟随符号链接，一旦链到 /data、/proc 就会长时间卡死。
 FALLBACK_DIRS="
 /system/etc
 /system_ext/etc
@@ -112,6 +114,7 @@ handle_file() {
 }
 
 # 首轮：各分区既定的 permissions / sysconfig 目录
+ui_print "- 扫描各分区 permissions / sysconfig"
 for dir in $DIRS; do
     [ -d "$dir" ] || continue
     for origin in "$dir"/*.xml; do
@@ -120,11 +123,14 @@ for dir in $DIRS; do
     done
 done
 
-# 兜底：首轮没找到就递归扫整棵 etc 树（系统路径里不会出现空格，可安全按词拆分）
+# 兜底：首轮没找到，就往下沉两层找子目录里的 *.xml。
+# find 不带 -L 时不跟随符号链接，深度也固定，避免陷进 /data、/proc 这类无底洞。
 if ! $found; then
+    ui_print "- 首轮未命中，搜索子目录（不跟随符号链接）"
     for dir in $FALLBACK_DIRS; do
         [ -d "$dir" ] || continue
-        for origin in $(grep -rlE "$MARKERS" "$dir" 2>/dev/null); do
+        # /xxx/etc 下最多下沉到 etc/<子目录>/<子目录>/*.xml，再深就不属于权限声明了
+        for origin in $(find "$dir" -maxdepth 3 -type f -name '*.xml' 2>/dev/null); do
             is_marker_file "$origin" && handle_file "$origin"
         done
     done
@@ -135,7 +141,7 @@ fi
 # 否则从 v3.9 起，任何升级或重装都会被误判成“不支持的机型”而直接失败。
 PREV_MODULE=/data/adb/modules/com.fei_ke.unlockcngms
 
-if ! $found && [ -f "$PREV_MODULE/post-fs-data.sh" ]; then
+if ! $found && [ -f "$PREV_MODULE/post-fs-data.sh" ] && [ "$PREV_MODULE" != "$MODPATH" ]; then
     ui_print "- 检测到模块已生效，原文件被本模块的挂载遮挡"
     ui_print "- 沿用上次的处理结果，不重新扫描"
 
