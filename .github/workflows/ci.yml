@@ -61,8 +61,7 @@ jobs:
           # tag 带 `-` 后缀（如 v3.9.2-pre、v3.9.2-rc1）自动发成 Pre-release
           prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
-            **模块版本**：${{ steps.prop.outputs.version }}
-            **模块说明**：${{ steps.prop.outputs.description }}
+            **安装前请确保设备运行国行 ROM，且卸载了相关模块。**
 
             刷入后可用 `adb shell pm list features | grep -E 'cn\.google|services_updater'` 验证，无输出即表示国行 GMS 标签已移除。
           generate_release_notes: true
