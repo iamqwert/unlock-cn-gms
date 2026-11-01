@@ -31,16 +31,32 @@ jobs:
           echo "description=$description" >> "$GITHUB_OUTPUT"
           echo "zip_name=$zip_name" >> "$GITHUB_OUTPUT"
 
+      - name: Check line endings
+        run: |
+          # 设备上的 sh 不剥掉 CR，脚本一旦是 CRLF 就解析失败（刷入报语法错）；
+          # .gitattributes 的 eol=lf 会让本地 git diff 看不出这类问题，只能在这里硬拦。
+          # 用 python 而不是 grep：CR 这类不可见字符在 shell 里要多层转义，容易写坏。
+          python3 - <<'PY'
+          import pathlib, sys
+          targets = [pathlib.Path("customize.sh"), pathlib.Path("module.prop")]
+          targets += [q for q in pathlib.Path("META-INF").rglob("*") if q.is_file()]
+          bad = [str(q) for q in targets if b"\r" in q.read_bytes()]
+          if bad:
+              print("::error::这些文件含 CR 字节，设备端 sh 会解析失败：" + ", ".join(bad))
+              sys.exit(1)
+          print("line endings OK: " + ", ".join(str(q) for q in targets))
+          PY
       - name: Pack module
         run: |
           # 模块 zip 只放刷入所需文件，META-INF/customize.sh/module.prop 位于根目录；
-          # README 仅随仓库提供，不随包分发
+          # README / update.json / CHANGELOG.md 仅随仓库提供（后两者是给管理器读的），不随包分发
           zip -r "${{ steps.prop.outputs.zip_name }}" . \
-            -x ".*" -x "*.zip" -x "README.md" -x "*/.git/*" -x "*/.github/*"
+            -x ".*" -x "*.zip" -x "README.md" -x "update.json" -x "CHANGELOG.md" \
+            -x "*/.git/*" -x "*/.github/*"
 
-          # 兜底校验：README 一旦混入就让构建失败，避免发出带说明文档的刷机包
-          if unzip -l "${{ steps.prop.outputs.zip_name }}" | grep -qiE '(^|/)README\.md$'; then
-            echo "::error::模块 zip 中不应包含 README.md"
+          # 兜底校验：这些文件一旦混入就让构建失败，避免发出带多余内容的刷机包
+          if unzip -l "${{ steps.prop.outputs.zip_name }}" | grep -qiE '(^|/)(README\.md|update\.json|CHANGELOG\.md)$'; then
+            echo "::error::模块 zip 中不应包含 README.md / update.json / CHANGELOG.md"
             exit 1
           fi
           unzip -l "${{ steps.prop.outputs.zip_name }}"
@@ -66,3 +82,51 @@ jobs:
             刷入后可用 `adb shell pm list features | grep -E 'cn\.google|services_updater'` 验证，无输出即表示国行 GMS 标签已移除。
           generate_release_notes: true
           files: ${{ steps.prop.outputs.zip_name }}
+
+      # 把这次的版本写进 update.json：管理器（KernelSU / APatch / Magisk）读它判断有没有更新。
+      # 预发布（tag 带 `-`）不写，避免把 rc/pre 推给普通用户。
+      - name: Publish update.json
+        if: github.ref_type == 'tag' && !contains(github.ref_name, '-')
+        env:
+          ZIP_NAME: ${{ steps.prop.outputs.zip_name }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version=//p' module.prop | head -n1)
+          # 版本号与 tag 不一致时绝不能发布：管理器会照着 update.json 拉错包
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::module.prop 的 version=$version 与 tag=$GITHUB_REF_NAME 不一致"
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json, os, pathlib
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          prop = dict(
+              line.split("=", 1) for line in
+              pathlib.Path("module.prop").read_text(encoding="utf-8").splitlines() if "=" in line
+          )
+          data = {
+              "version": prop["version"].strip(),
+              "versionCode": int(prop["versionCode"].strip()),
+              "zipUrl": f"https://github.com/{repo}/releases/download/{tag}/{os.environ['ZIP_NAME']}",
+              "changelog": f"https://raw.githubusercontent.com/{repo}/master/CHANGELOG.md",
+          }
+          pathlib.Path("update.json").write_text(
+              json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+          print(pathlib.Path("update.json").read_text(encoding="utf-8"))
+          PY
+
+          # 更新日志用的 CHANGELOG.md 由人工维护（随每个版本补一条），这里只更新 update.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add update.json
+          if git diff --cached --quiet; then
+            echo "update.json 无变化，跳过提交"
+            exit 0
+          fi
+          # [skip ci]：这次提交只是元数据，不需要再触发一轮构建
+          git commit -m "chore: 更新描述到 ${GITHUB_REF_NAME} [skip ci]"
+          if ! git push origin HEAD:master; then
+            echo "::warning::update.json 没能推送到 master（tag 可能不在 master 上），请手动同步"
+          fi
